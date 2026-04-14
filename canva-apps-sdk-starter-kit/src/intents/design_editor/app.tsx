@@ -1,13 +1,11 @@
 import { Button, Rows, Text, MultilineInput } from "@canva/app-ui-kit";
 import { useState } from "react";
 import * as styles from "styles/components.css"; 
-import { extractSlideSchema, applyMappingToCanvas } from "./utils/slideExtractor";
+import { extractDeckSchema, applyMappingToCanvas } from "./utils/slideExtractor";
 
 export const App = () => {
   const [isExtracting, setIsExtracting] = useState(false);
   const [userContent, setUserContent] = useState("");
-  
-  // New state to replace the blocked alert() calls
   const [statusMsg, setStatusMsg] = useState("");
 
   const handleAutomateClick = async () => {
@@ -17,32 +15,52 @@ export const App = () => {
     }
 
     setIsExtracting(true);
-    setStatusMsg("🔍 Analyzing canvas layout...");
+    setStatusMsg("🔍 Analyzing full deck layout...");
     
     try {
-      const schema = await extractSlideSchema();
-      const safeSchemaForBackend = schema.map(({ canvaRef, ...rest }) => rest);
+      // 1. Extract the Multi-Slide Deck Roster
+      const deckSchema = await extractDeckSchema();
+      console.log("✅ Deck Roster Extracted:", deckSchema);
 
-      setStatusMsg("🧠 Generating AI mapping...");
-      const response = await fetch("http://localhost:8081/api/map-content", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_content: userContent,
-          slide_schema: safeSchemaForBackend,
-        }),
-      });
+      setStatusMsg("🧠 Generating AI mapping for full deck...");
 
-      if (!response.ok) throw new Error(`Proxy error: ${response.statusText}`);
+      // 2. Exponential Backoff Retry Loop
+      let response;
+      let retries = 3;
+      let delay = 1000; // Start with a 1 second delay
+
+      for (let i = 0; i < retries; i++) {
+        response = await fetch("http://localhost:8081/api/map-content", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_content: userContent,
+            slide_schema: deckSchema, // <-- Sending the multi-slide layout!
+          }),
+        });
+
+        if (response.ok) break; // Success! Exit the retry loop.
+
+        console.warn(`Attempt ${i + 1} failed. Retrying in ${delay}ms...`);
+        setStatusMsg(`⚠️ API busy. Retrying... (${i + 1}/${retries})`);
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; 
+      }
+
+      if (!response || !response.ok) {
+        throw new Error(`Proxy error after ${retries} attempts.`);
+      }
 
       const mappedContent = await response.json();
+      console.log("🧠 Ollama Mapping Result:", mappedContent);
       
-      setStatusMsg("✍️ Injecting content into slide...");
+      setStatusMsg("✍️ Injecting content into slides...");
+      
+      // 3. Write back to the canvas
       await applyMappingToCanvas(mappedContent);
       
-      setStatusMsg("🎉 Slide successfully automated!");
-      
-      // Clear the success message after 4 seconds
+      setStatusMsg("🎉 Deck successfully automated!");
       setTimeout(() => setStatusMsg(""), 4000);
 
     } catch (error) {
@@ -57,17 +75,16 @@ export const App = () => {
     <div className={styles.scrollContainer || ""}>
       <Rows spacing="3u">
         <Text>
-          Paste your presentation content below, and we will automatically format it to fit the current slide!
+          Paste your presentation notes below, and we will automatically format them across the entire deck!
         </Text>
         
         <MultilineInput
           value={userContent}
           onChange={(value) => setUserContent(value)}
-          placeholder="e.g. Our Q3 Revenue was fantastic. We hit $2.4M in sales, which is a 15% increase from last quarter."
+          placeholder="e.g. Our Q3 Revenue was fantastic. We hit $2.4M in sales..."
           minRows={5}
         />
         
-        {/* Dynamic Status Feedback */}
         {statusMsg && (
           <Text tone={statusMsg.includes("❌") ? "critical" : "positive"}>
             {statusMsg}
@@ -80,7 +97,7 @@ export const App = () => {
           disabled={isExtracting || !userContent.trim()}
           stretch
         >
-          {isExtracting ? "Automating Slide..." : "Populate Slide"}
+          {isExtracting ? "Automating Deck..." : "Populate Deck"}
         </Button>
       </Rows>
     </div>
